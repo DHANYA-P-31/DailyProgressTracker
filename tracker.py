@@ -4,12 +4,13 @@ import sqlite3
 from apscheduler.schedulers.background import BackgroundScheduler
 import atexit
 import os
+import pytz
 
 app = Flask(__name__)
 app.secret_key = 'your-secret-key'  # Required for flash messages
 
-# SQLite database path (Windows-compatible)
-DB_PATH = os.getenv('DB_PATH', r'C:\Users\Home\projects\Daily_tracker\tracker.db')
+# SQLite database path (cross-platform compatible)
+DB_PATH = os.getenv('DB_PATH', os.path.join(os.path.dirname(__file__), 'tracker.db'))
 
 # Initialize SQLite database
 def init_db():
@@ -81,7 +82,7 @@ def populate_default_schedule():
                               (day, task, hours))
             conn.commit()
 
-# HTML template with Bootstrap 5 and updated date format
+# HTML template with Bootstrap 5, updated date format, and reset all tasks modal
 HTML_TEMPLATE = '''
 <!DOCTYPE html>
 <html lang="en">
@@ -128,6 +129,9 @@ HTML_TEMPLATE = '''
                     </li>
                     <li class="nav-item">
                         <a class="nav-link" href="#" onclick="showSection('reminders')" id="nav-reminders">Reminders</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="#" onclick="showSection('reset')" id="nav-reset">Reset All Tasks</a>
                     </li>
                 </ul>
             </div>
@@ -336,6 +340,27 @@ HTML_TEMPLATE = '''
             </div>
         </div>
 
+        <!-- Reset All Tasks Modal -->
+        <div class="modal fade" id="resetAllTasksModal" tabindex="-1" aria-labelledby="resetAllTasksModalLabel" aria-hidden="true">
+            <div class="modal-dialog">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title" id="resetAllTasksModalLabel">Delete All Tasks</h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body">
+                        Are you sure you want to delete all tasks? This action cannot be undone, and all task data will be permanently removed.
+                    </div>
+                    <div class="modal-footer">
+                        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                        <form method="POST" action="/reset_all_tasks" onsubmit="showSuccessToast('All tasks deleted successfully!')">
+                            <button type="submit" class="btn btn-danger">Delete All Tasks</button>
+                        </form>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <!-- Daily Progress Section -->
         <section id="progress" class="section d-none">
             <div class="card shadow-sm">
@@ -455,6 +480,19 @@ HTML_TEMPLATE = '''
                 </div>
             </div>
         </section>
+
+        <!-- Reset All Tasks Section -->
+        <section id="reset" class="section d-none">
+            <div class="card shadow-sm">
+                <div class="card-header bg-primary text-white">
+                    <h2 class="h4 mb-0">Delete All Tasks</h2>
+                </div>
+                <div class="card-body">
+                    <p>Click the button below to delete all tasks. This action cannot be undone, and all task data will be permanently removed.</p>
+                    <button class="btn btn-danger" data-bs-toggle="modal" data-bs-target="#resetAllTasksModal">Delete All Tasks</button>
+                </div>
+            </div>
+        </section>
     </main>
 
     <footer class="bg-primary text-white text-center py-3">
@@ -553,7 +591,7 @@ def index():
         days = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
         
         # Generate a default report for the dashboard (current week)
-        start_date = datetime.now().strftime('%Y-%m-%d')
+        start_date = datetime.now(pytz.timezone('Asia/Kolkata')).strftime('%Y-%m-%d')
         end_date = (datetime.strptime(start_date, '%Y-%m-%d') + timedelta(days=6)).strftime('%Y-%m-%d')
         c.execute('SELECT * FROM tasks WHERE date BETWEEN ? AND ? ORDER BY date', (start_date, end_date))
         report_tasks = [{'date': row[1], 'task': row[3], 'completed': row[6],
@@ -598,15 +636,24 @@ def add_schedule():
 
     with sqlite3.connect(DB_PATH) as conn:
         c = conn.cursor()
+        # Check for existing tasks in the week to avoid duplicates
+        end_date = (start_date + timedelta(days=6)).strftime('%Y-%m-%d')
+        c.execute('SELECT date FROM tasks WHERE date BETWEEN ? AND ?', (start_date.strftime('%Y-%m-%d'), end_date))
+        existing_dates = {row[0] for row in c.fetchall()}
         c.execute('SELECT * FROM schedule_template')
         schedule_tasks = [{'day': row[1], 'task': row[2], 'target_hours': row[3]} for row in c.fetchall()]
         for i in range(7):
             date = (start_date + timedelta(days=i)).strftime('%Y-%m-%d')
-            day = (start_date + timedelta(days=i)).strftime('%A')
-            for task in schedule_tasks:
-                if task['day'] == day:
-                    c.execute('INSERT INTO tasks (date, day, task, target_hours, completed) VALUES (?, ?, ?, ?, ?)',
-                              (date, day, task['task'], task['target_hours'], 'N'))
+            if date in existing_dates:
+                # Update existing tasks to reset completed status
+                c.execute('UPDATE tasks SET completed = ?, time_spent = NULL, notes = NULL WHERE date = ?', ('N', date))
+            else:
+                # Insert new tasks for the day
+                day = (start_date + timedelta(days=i)).strftime('%A')
+                for task in schedule_tasks:
+                    if task['day'] == day:
+                        c.execute('INSERT INTO tasks (date, day, task, target_hours, completed) VALUES (?, ?, ?, ?, ?)',
+                                  (date, day, task['task'], task['target_hours'], 'N'))
         conn.commit()
     flash('Weekly schedule generated successfully!')
     return redirect(url_for('index'))
@@ -745,14 +792,28 @@ def delete_task():
     flash('Task deleted successfully!')
     return redirect(url_for('index'))
 
+@app.route('/reset_all_tasks', methods=['POST'])
+def reset_all_tasks():
+    with sqlite3.connect(DB_PATH) as conn:
+        c = conn.cursor()
+        c.execute('DELETE FROM tasks')
+        conn.commit()
+    flash('All tasks deleted successfully!')
+    return redirect(url_for('index'))
+
 def check_reminders():
     with sqlite3.connect(DB_PATH) as conn:
         c = conn.cursor()
-        yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+        ist = pytz.timezone('Asia/Kolkata')
+        today = datetime.now(ist).strftime('%Y-%m-%d')
+        yesterday = (datetime.now(ist) - timedelta(days=1)).strftime('%Y-%m-%d')
+        # Add uncompleted tasks from yesterday to reminders
         c.execute('SELECT date, task FROM tasks WHERE date = ? AND completed = ?', (yesterday, 'N'))
         uncompleted_tasks = c.fetchall()
         for date, task in uncompleted_tasks:
             c.execute('INSERT INTO reminders (date, task) VALUES (?, ?)', (yesterday, task))
+        # Reset all tasks for today to uncompleted
+        c.execute('UPDATE tasks SET completed = ?, time_spent = NULL, notes = NULL WHERE date = ?', ('N', today))
         conn.commit()
 
 # Schedule daily reminder at 10:00 AM IST
