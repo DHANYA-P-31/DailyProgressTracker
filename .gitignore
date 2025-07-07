@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+tracker.db
+venv/
+*.sqlite3
+.env
